@@ -181,10 +181,10 @@ module Punchblock
       def run_at_fully_booted
         if redirect_context_status =~ /failed/
           pb_logger.warn "Redirect context #{REDIRECT_CONTEXT} does not exist! Adding context to dialplan"
-          send_ami_action 'Command', 'Command' => "dialplan add extension #{REDIRECT_EXTENSION},#{REDIRECT_PRIORITY},NoOp into #{REDIRECT_CONTEXT}"
-          send_ami_action 'Command', 'Command' => "dialplan add extension #{REDIRECT_EXTENSION},#{REDIRECT_PRIORITY + 1},Answer into #{REDIRECT_CONTEXT}"
-          send_ami_action 'Command', 'Command' => "dialplan add extension #{REDIRECT_EXTENSION},#{REDIRECT_PRIORITY + 2},AMD into #{REDIRECT_CONTEXT}"
-          send_ami_action 'Command', 'Command' => "dialplan add extension #{REDIRECT_EXTENSION},#{REDIRECT_PRIORITY + 3},AGI,agi:async into #{REDIRECT_CONTEXT}"
+          send_ami_action 'Command', 'Command' => "dialplan add extension #{REDIRECT_EXTENSION},1,NoOp into #{REDIRECT_CONTEXT}"
+          send_ami_action 'Command', 'Command' => "dialplan add extension #{REDIRECT_EXTENSION},2,Answer into #{REDIRECT_CONTEXT}"
+          send_ami_action 'Command', 'Command' => "dialplan add extension #{REDIRECT_EXTENSION},3,AMD into #{REDIRECT_CONTEXT}"
+          send_ami_action 'Command', 'Command' => "dialplan add extension #{REDIRECT_EXTENSION},4,AGI,agi:async into #{REDIRECT_CONTEXT}"
 
           if redirect_context_status =~ /failed/
             pb_logger.error "Punchblock failed to add the #{REDIRECT_EXTENSION} extension to the #{REDIRECT_CONTEXT} context. Please add a [#{REDIRECT_CONTEXT}] entry to your dialplan."
