@@ -185,7 +185,7 @@ module Punchblock
           pb_logger.warn "Redirect context #{REDIRECT_CONTEXT} does not exist! Adding context to dialplan"
           send_ami_action 'Command', 'Command' => "dialplan add extension #{REDIRECT_EXTENSION},1,NoOp into #{REDIRECT_CONTEXT}"
           send_ami_action 'Command', 'Command' => "dialplan add extension #{REDIRECT_EXTENSION},2,Answer into #{REDIRECT_CONTEXT}"
-          send_ami_action 'Command', 'Command' => "dialplan add extension #{REDIRECT_EXTENSION},3,GotoIf($[\"${CALLERID(name)}\" = \"PHRG\"]?#{REDIRECT_CONTEXT},#{REDIRECT_EXTENSION},4:#{AMD_CONTEXT},#{AMD_EXTENSION},1) into #{REDIRECT_CONTEXT}"
+          send_ami_action 'Command', 'Command' => "dialplan add extension #{REDIRECT_EXTENSION},3,GotoIf($[${CALLERID(name)} = PHRG]?#{REDIRECT_CONTEXT},#{REDIRECT_EXTENSION},4:#{AMD_CONTEXT},#{AMD_EXTENSION},1) into #{REDIRECT_CONTEXT}"
           send_ami_action 'Command', 'Command' => "dialplan add extension #{REDIRECT_EXTENSION},4,AGI,agi:async into #{REDIRECT_CONTEXT}"
 
           send_ami_action 'Command', 'Command' => "dialplan add extension #{AMD_EXTENSION},1,AMD into #{AMD_CONTEXT}"
