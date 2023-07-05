@@ -23,6 +23,8 @@ module Punchblock
       REDIRECT_CONTEXT = 'adhearsion-redirect'
       REDIRECT_EXTENSION = '1'
       REDIRECT_PRIORITY = '1'
+      AMD_EXTENSION = '2'
+      AMD_CONTEXT = 'amd-context'
 
       EVENTS_ALLOWED_BRIDGED = %w{AGIExec AsyncAGI}
 
@@ -183,8 +185,11 @@ module Punchblock
           pb_logger.warn "Redirect context #{REDIRECT_CONTEXT} does not exist! Adding context to dialplan"
           send_ami_action 'Command', 'Command' => "dialplan add extension #{REDIRECT_EXTENSION},1,NoOp into #{REDIRECT_CONTEXT}"
           send_ami_action 'Command', 'Command' => "dialplan add extension #{REDIRECT_EXTENSION},2,Answer into #{REDIRECT_CONTEXT}"
-          send_ami_action 'Command', 'Command' => "dialplan add extension #{REDIRECT_EXTENSION},3,AMD into #{REDIRECT_CONTEXT}"
+          send_ami_action 'Command', 'Command' => "dialplan add extension #{REDIRECT_EXTENSION},3,GotoIf($[${CALLERID(name)} = PHRG]?#{REDIRECT_CONTEXT},#{REDIRECT_EXTENSION},4:#{AMD_CONTEXT},#{AMD_EXTENSION},1:) into #{REDIRECT_CONTEXT}"
           send_ami_action 'Command', 'Command' => "dialplan add extension #{REDIRECT_EXTENSION},4,AGI,agi:async into #{REDIRECT_CONTEXT}"
+
+          send_ami_action 'Command', 'Command' => "dialplan add extension #{AMD_EXTENSION},1,AMD into #{AMD_CONTEXT}"
+          send_ami_action 'Command', 'Command' => "dialplan add extension #{AMD_EXTENSION},2,Goto(#{REDIRECT_CONTEXT},#{REDIRECT_EXTENSION},4) into #{AMD_CONTEXT}"
 
           if redirect_context_status =~ /failed/
             pb_logger.error "Punchblock failed to add the #{REDIRECT_EXTENSION} extension to the #{REDIRECT_CONTEXT} context. Please add a [#{REDIRECT_CONTEXT}] entry to your dialplan."
