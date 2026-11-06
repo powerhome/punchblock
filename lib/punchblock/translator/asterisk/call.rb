@@ -1,5 +1,6 @@
 # encoding: utf-8
 
+require 'monitor'
 require 'punchblock/translator/asterisk/ami_error_converter'
 
 module Punchblock
@@ -10,6 +11,9 @@ module Punchblock
         include DeadActorSafety
 
         InvalidCommandError = Class.new Punchblock::Error
+
+        # Errors that Celluloid raises to unwind a task or abort a call to the actor. They are control flow for the translator, so they must not be swallowed.
+        CELLULOID_CONTROL_FLOW = [Celluloid::Task::TerminatedError, Celluloid::AbortError].freeze
 
         OUTBOUND_CHANNEL_MATCH = /.* <(?<channel>.*)>/.freeze
 
@@ -36,6 +40,7 @@ module Punchblock
           @block_commands = false
           @channel_variables = {}
           @hangup_cause = nil
+          @handler_registry_lock = Monitor.new
         end
 
         def register_component(component)
@@ -48,6 +53,12 @@ module Punchblock
 
         def component_with_id(component_id)
           @components[component_id]
+        end
+
+        # HasGuardedHandlers keeps handlers in plain Arrays, which registering, unregistering and triggering mutate or copy from different threads.
+        # On JRuby that loses handlers and can raise ConcurrencyError, so serialise those operations per call. Handler blocks run outside the lock.
+        def register_handler_with_options(*)
+          @handler_registry_lock.synchronize { super }
         end
 
         def send_offer
@@ -182,6 +193,12 @@ module Punchblock
             @channel_variables[ami_event['Variable']] = ami_event['Value']
           end
           trigger_handler :ami, ami_event
+        rescue *CELLULOID_CONTROL_FLOW
+          raise
+        rescue => e
+          # One Asterisk translator serves every call, so an error escaping here kills it for all of them. Keep the damage to this call.
+          pb_logger.error "Error handling AMI event #{ami_event.name} for call #{id} (#{channel}): #{e.class}: #{e.message}\n#{Array(e.backtrace).join("\n")}"
+          end_call_after_failed_hangup ami_event if ami_event.name == 'Hangup'
         end
 
         def send_message(body)
@@ -337,6 +354,21 @@ module Punchblock
         end
 
         private
+
+        def delete_handler_if(*)
+          @handler_registry_lock.synchronize { super }
+        end
+
+        def handlers_of_type(*)
+          @handler_registry_lock.synchronize { super }
+        end
+
+        # The End event is what deregisters the call, so a Hangup that failed part way must still send it, unless it already did.
+        def end_call_after_failed_hangup(ami_event)
+          return unless translator.call_with_id id
+          code = ami_event['Cause'].to_i
+          send_end_event @hangup_cause || HANGUP_CAUSE_TO_END_REASON[code], code, ami_event.best_time
+        end
 
         def fetch_channel_var(variable)
           result = @ami_client.send_action 'GetVar', 'Channel' => channel, 'Variable' => variable
