@@ -289,6 +289,60 @@ module Punchblock
           end
         end
 
+        describe 'handler registry locking' do
+          # Holds the registry open on another thread (the block given to delete_handler_if runs inside the lock),
+          # runs the operation on a third thread and reports whether that thread ended up blocked on the registry.
+          def blocked_by_registry?(call, &operation)
+            inside_registry = Queue.new
+            release_registry = Queue.new
+            call.register_handler(:ami, name: 'Other') { |_| }
+            holder = Thread.new do
+              call.send(:delete_handler_if, :ami) do |*|
+                inside_registry << true
+                release_registry.pop
+                false
+              end
+            end
+            inside_registry.pop
+
+            thread = Thread.new(&operation)
+            Timeout.timeout(5) { Thread.pass until thread.status != 'run' }
+            thread.status == 'sleep'
+          ensure
+            release_registry << true
+            [holder, thread].compact.each { |t| t.join(2) || t.kill }
+          end
+
+          it 'makes registering a handler wait while the registry is in use' do
+            expect(blocked_by_registry?(subject) { subject.register_handler(:ami, name: 'Foo') { |_| } }).to be true
+          end
+
+          it 'makes unregistering a handler wait while the registry is in use' do
+            expect(blocked_by_registry?(subject) { subject.unregister_handler(:ami, 'unknown') }).to be true
+          end
+
+          it 'makes triggering handlers wait while the registry is in use' do
+            expect(blocked_by_registry?(subject) { subject.trigger_handler(:ami, RubyAMI::Event.new('Foo')) }).to be true
+          end
+
+          it 'lets other threads register handlers while a handler is running' do
+            registered_while_handling = nil
+            subject.register_handler(:ami, name: 'Ping') do |_|
+              other_thread = Thread.new { subject.register_handler(:ami, name: 'Pong') { |_| } }
+              registered_while_handling = !other_thread.join(2).nil?
+            end
+
+            subject.trigger_handler :ami, RubyAMI::Event.new('Ping')
+
+            expect(registered_while_handling).to be true
+          end
+
+          it 'keeps the registry internals private' do
+            expect(subject).not_to respond_to(:handlers_of_type)
+            expect(subject).not_to respond_to(:delete_handler_if)
+          end
+        end
+
         describe '#process_ami_event' do
           context 'with a Hangup event' do
             let :ami_event do
@@ -805,6 +859,104 @@ module Punchblock
                 response.call event
               end
               subject.process_ami_event ami_event
+            end
+          end
+
+          context 'with a handler that raises' do
+            let :ami_event do
+              RubyAMI::Event.new 'DTMF',
+                'Digit'     => '4',
+                'Start'     => 'Yes',
+                'End'       => 'No',
+                'Uniqueid'  => "1320842458.8",
+                'Channel'   => "SIP/1234-00000000"
+            end
+
+            let(:logger) { double('logger').as_null_object }
+
+            before { allow(subject).to receive(:pb_logger).and_return logger }
+
+            it 'should not raise the error' do
+              subject.register_handler(:ami, name: 'DTMF') { raise ConcurrencyError, 'lost the race' }
+              expect { subject.process_ami_event ami_event }.not_to raise_error
+            end
+
+            it 'should log the error with its backtrace' do
+              subject.register_handler(:ami, name: 'DTMF') { raise ConcurrencyError, 'lost the race' }
+              expect(logger).to receive(:error).once.with(/DTMF.*ConcurrencyError: lost the race.*\.rb:\d+/m)
+              subject.process_ami_event ami_event
+            end
+
+            it 'should contain an error from a call that has already ended' do
+              subject.register_handler(:ami, name: 'DTMF') { raise Celluloid::DeadActorError, 'component is dead' }
+              expect { subject.process_ami_event ami_event }.not_to raise_error
+            end
+
+            it 'should keep handling later events' do
+              digits = []
+              failed = false
+              subject.register_handler :ami, :name => 'DTMF' do |event|
+                unless failed
+                  failed = true
+                  raise ConcurrencyError, 'lost the race'
+                end
+                digits << event['Digit']
+              end
+              2.times { subject.process_ami_event ami_event }
+              expect(digits).to eq(['4'])
+            end
+
+            [Celluloid::Task::TerminatedError, Celluloid::AbortError].each do |control_flow|
+              it "should not swallow #{control_flow}, which is control flow for the translator" do
+                subject.register_handler(:ami, name: 'DTMF') { raise control_flow, 'control flow' }
+                expect { subject.process_ami_event ami_event }.to raise_error control_flow
+              end
+            end
+          end
+
+          context 'with a Hangup event that fails part way' do
+            let :ami_event do
+              RubyAMI::Event.new 'Hangup',
+                'Uniqueid'      => "1320842458.8",
+                'Cause'         => '16',
+                'Cause-txt'     => 'Normal Clearing',
+                'Channel'       => "SIP/1234-00000000"
+            end
+
+            let(:expected_end_event) { Punchblock::Event::End.new :reason => :hungup, platform_code: '16', :target_call_id => subject.id }
+
+            before do
+              translator.register_call subject
+              allow(subject).to receive(:pb_logger).and_return double('logger').as_null_object
+            end
+
+            context 'because a component fails while the call is hanging up' do
+              let(:component) { double 'component', id: 'component-1' }
+
+              before do
+                allow(component).to receive(:call_ended).and_raise Celluloid::DeadActorError, 'component is dead'
+                subject.register_component component
+              end
+
+              it 'should still send the end event' do
+                expect(translator).to receive(:handle_pb_event).with(expected_end_event).once
+                subject.process_ami_event ami_event
+              end
+
+              it 'should still de-register the call from the translator' do
+                allow(translator).to receive :handle_pb_event
+                subject.process_ami_event ami_event
+                expect(translator.call_with_id(subject.id)).to be_nil
+              end
+            end
+
+            context 'because a handler fails after the call was ended' do
+              before { subject.register_handler(:ami, name: 'Hangup') { raise ConcurrencyError, 'lost the race' } }
+
+              it 'should not send the end event a second time' do
+                expect(translator).to receive(:handle_pb_event).with(expected_end_event).once
+                subject.process_ami_event ami_event
+              end
             end
           end
 
